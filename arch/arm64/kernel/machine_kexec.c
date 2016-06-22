@@ -40,7 +40,7 @@ int machine_kexec_prepare(struct kimage *kimage)
 {
 	kimage_start = kimage->start;
 
-	if (kimage->type != KEXEC_TYPE_CRASH /* && cpus_are_stuck_in_kernel()*/) {
+	if (kimage->type != KEXEC_TYPE_CRASH  && cpus_are_stuck_in_kernel()) {
 		pr_err("Can't kexec: CPUs are stuck in the kernel.\n");
 		return -EBUSY;
 	}
@@ -120,7 +120,7 @@ void machine_kexec(struct kimage *kimage)
 	/*
 	 * New cpus may have become stuck_in_kernel after we loaded the image.
 	 */
-	BUG_ON(/* cpus_are_stuck_in_kernel() || */ (num_online_cpus() > 1));
+	BUG_ON(cpus_are_stuck_in_kernel() || (num_online_cpus() > 1));
 
 	reboot_code_buffer_phys = page_to_phys(kimage->control_code_page);
 	reboot_code_buffer = phys_to_virt(reboot_code_buffer_phys);
@@ -158,8 +158,8 @@ void machine_kexec(struct kimage *kimage)
 	 * relocation is complete.
 	 */
 
-//	cpu_soft_restart(1, reboot_code_buffer_phys, kimage->head,
-//		kimage_start, 0);
+	cpu_soft_restart(1, reboot_code_buffer_phys, kimage->head,
+		kimage_start, 0);
 
 	BUG(); /* Should never get here. */
 }
