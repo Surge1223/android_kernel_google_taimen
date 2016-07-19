@@ -24,6 +24,10 @@
 
 #include "cpu-reset.h"
 
+/* Bypass purgatory for debugging. */
+static bool bypass_purgatory;
+core_param(bypass_purgatory, bypass_purgatory, bool, 0644);
+
 /* Global variables for the arm64_relocate_new_kernel routine. */
 extern const unsigned char arm64_relocate_new_kernel[];
 extern const unsigned long arm64_relocate_new_kernel_size;
@@ -110,6 +114,20 @@ static unsigned long kexec_find_dtb(const struct kimage *kimage)
 
 	BUG();
 	return 0;
+}
+
+static struct bypass {
+	unsigned long kernel;
+	unsigned long dtb;
+} bypass;
+
+static void fill_bypass(const struct kimage *kimage)
+{
+	bypass.kernel = kexec_find_kernel(kimage);
+	bypass.dtb = kexec_find_dtb(kimage);
+
+	pr_debug("%s: kernel: %016lx\n", __func__, bypass.kernel);
+	pr_debug("%s: dtb:    %016lx\n", __func__, bypass.dtb);
 }
 
 /**
@@ -281,6 +299,7 @@ int machine_kexec_prepare(struct kimage *kimage)
 	kimage_start = kimage->start;
 
 	kexec_image_info(kimage);
+	fill_bypass(kimage);
 
 	if (kimage->type != KEXEC_TYPE_CRASH && cpus_are_stuck_in_kernel()) {
 		pr_err("Can't kexec: CPUs are stuck in the kernel.\n");
@@ -417,6 +436,10 @@ void machine_kexec(struct kimage *kimage)
 	 * relocation is complete.
 	 */
 
+	if (bypass_purgatory)
+	cpu_soft_restart(1, reboot_code_buffer_phys, kimage->head,
+		bypass.kernel, bypass.dtb);
+	else
 	cpu_soft_restart(1, reboot_code_buffer_phys, kimage->head,
 		kimage_start, 0);
 
