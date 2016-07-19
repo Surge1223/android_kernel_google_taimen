@@ -9,8 +9,14 @@
  * published by the Free Software Foundation.
  */
 
+#define DEBUG 1
+#define DUMP_VERBOSITY 1 /* 1..4 */
+
 #include <linux/kexec.h>
+#include <linux/libfdt_env.h>
+#include <linux/of_fdt.h>
 #include <linux/smp.h>
+#include <linux/uaccess.h>
 
 #include <asm/cacheflush.h>
 #include <asm/cpu_ops.h>
@@ -23,6 +29,127 @@ extern const unsigned char arm64_relocate_new_kernel[];
 extern const unsigned long arm64_relocate_new_kernel_size;
 
 static unsigned long kimage_start;
+
+/**
+ * kexec_is_kernel_header - Helper routine to check the kernel header signature.
+ */
+static bool kexec_is_kernel_header(const void *image)
+{
+	struct arm64_image_header {
+		uint8_t pe_sig[2];
+		uint16_t branch_code[3];
+		uint64_t text_offset;
+		uint64_t image_size;
+		uint8_t flags[8];
+		uint64_t reserved_1[3];
+		uint8_t magic[4];
+		uint32_t pe_header;
+	} h;
+
+        if (copy_from_user(&h, image, sizeof(struct arm64_image_header)))
+		return false;
+
+	if (!h.text_offset)
+		return false;
+
+	return (h.magic[0] == 'A'
+		&& h.magic[1] == 'R'
+		&& h.magic[2] == 'M'
+		&& h.magic[3] == 0x64U);
+}
+
+/**
+ * kexec_find_kernel - Helper routine to find the kernel entry.
+ */
+static unsigned long kexec_find_kernel(const struct kimage *kimage)
+{
+	int i;
+
+	for (i = 0; i < kimage->nr_segments; i++) {
+		unsigned long header_offset;
+
+		for (header_offset = 0; header_offset < 2 * 1024 * 1024;
+			header_offset += 4 * 1024) {
+			if (!kexec_is_kernel_header(kimage->segment[i].buf +
+				header_offset))
+				continue;
+			BUG_ON(!kimage->segment[i].mem);
+			return kimage->segment[i].mem + header_offset;
+		}
+	}
+	BUG();
+	return 0;
+}
+
+/**
+ * kexec_is_dtb - Helper routine to check the device tree header signature.
+ */
+static bool kexec_is_dtb(const void *dtb)
+{
+	__be32 magic;
+
+	if (get_user(magic, (__be32 *)dtb))
+		return false;
+
+	return fdt32_to_cpu(magic) == OF_DT_HEADER;
+}
+
+/**
+ * kexec_find_dtb - Helper routine to find the dtb.
+ */
+static unsigned long kexec_find_dtb(const struct kimage *kimage)
+{
+	int i;
+
+	for (i = 0; i < kimage->nr_segments; i++) {
+		if (kexec_is_dtb(kimage->segment[i].buf)) {
+			BUG_ON(!kimage->segment[i].mem);
+			return kimage->segment[i].mem;
+		}
+	}
+
+	BUG();
+	return 0;
+}
+
+/**
+ * kexec_list_walk - Helper to walk the kimage page list.
+ */
+static void kexec_list_walk(void *ctx, struct kimage *kimage,
+	void (*cb)(void *ctx, unsigned int flag, void *addr, void *dest))
+{
+	void *dest;
+	kimage_entry_t *entry;
+
+	for (entry = &kimage->head, dest = NULL; ; entry++) {
+		unsigned int flag = *entry & IND_FLAGS;
+		void *addr;
+
+		if (flag == IND_DONE) {
+			cb(ctx, flag , NULL, NULL);
+			break;
+		}
+
+		addr = phys_to_virt(*entry & PAGE_MASK);
+
+		switch (flag) {
+		case IND_INDIRECTION:
+			entry = (kimage_entry_t *)addr - 1;
+			cb(ctx, flag, addr, NULL);
+			break;
+		case IND_DESTINATION:
+			dest = addr;
+			cb(ctx, flag, addr, NULL);
+			break;
+		case IND_SOURCE:
+			cb(ctx, flag, addr, dest);
+			dest += PAGE_SIZE;
+			break;
+		default:
+			break;
+		}
+	}
+}
 
 /**
  * kexec_image_info - For debugging output.
@@ -48,6 +175,93 @@ static void _kexec_image_info(const char *func, int line,
 			kimage->segment[i].memsz,
 			kimage->segment[i].memsz /  PAGE_SIZE);
 	}
+}
+
+/**
+ * kexec_list_dump - Debugging dump of the kimage page list.
+ */
+static void kexec_list_dump_cb(void *ctx, unsigned int flag, void *addr,
+	void *dest)
+{
+	unsigned int verbosity = (unsigned long)ctx;
+	phys_addr_t paddr = virt_to_phys(addr);
+	phys_addr_t pdest = virt_to_phys(dest);
+
+	switch (flag) {
+	case IND_INDIRECTION:
+		pr_debug("  I: %pa (%p)\n", &paddr, addr);
+		break;
+	case IND_DESTINATION:
+		pr_debug("  D: %pa (%p)\n",
+			&paddr, addr);
+		break;
+	case IND_SOURCE:
+		if (verbosity == 2)
+			pr_debug("S");
+		if (verbosity == 3)
+			pr_debug("  S -> %pa (%p)\n", &pdest, dest);
+		if (verbosity == 4)
+			pr_debug("  S: %pa (%p) -> %pa (%p)\n", &paddr, addr,
+				&pdest, dest);
+		break;
+	case IND_DONE:
+		pr_debug("  DONE\n");
+		break;
+	default:
+		pr_debug("  ?: %pa (%p)\n", &paddr, addr);
+		break;
+	}
+}
+
+#define kexec_list_dump(_i, _v) _kexec_list_dump(__func__, __LINE__, _i, _v)
+static void _kexec_list_dump(const char *func, int line,
+	struct kimage *kimage, unsigned int verbosity)
+{
+#if !defined(DEBUG)
+	return;
+#endif
+
+	pr_debug("%s:%d: kexec_list_dump:\n", func, line);
+
+	kexec_list_walk((void *)(unsigned long)verbosity, kimage,
+		kexec_list_dump_cb);
+}
+
+static void dump_cpus(void)
+{
+	unsigned int cpu;
+	char s[1024];
+	char *p;
+
+	p = s + sprintf(s, "%s: all:       ", __func__);
+	for_each_cpu(cpu, cpu_all_mask)
+		p += sprintf(p, " %d", cpu);
+	pr_debug("%s\n", s);
+
+	p = s + sprintf(s, "%s: possible:  ", __func__);
+	for_each_possible_cpu(cpu)
+		p += sprintf(p, " %d", cpu);
+	pr_debug("%s\n", s);
+
+	p = s + sprintf(s, "%s: present:   ", __func__);
+	for_each_present_cpu(cpu)
+		p += sprintf(p, " %d", cpu);
+	pr_debug("%s\n", s);
+
+	p = s + sprintf(s, "%s: active:    ", __func__);
+	for_each_cpu(cpu, cpu_active_mask)
+		p += sprintf(p, " %d", cpu);
+	pr_debug("%s\n", s);
+
+	p = s + sprintf(s, "%s: online:    ", __func__);
+	for_each_online_cpu(cpu)
+		p += sprintf(p, " %d", cpu);
+	pr_debug("%s\n", s);
+
+	p = s + sprintf(s, "%s: not online:", __func__);
+	for_each_cpu_not(cpu, cpu_online_mask)
+		p += sprintf(p, " %d", cpu);
+	pr_debug("%s\n", s);
 }
 
 void machine_kexec_cleanup(struct kimage *kimage)
@@ -166,6 +380,9 @@ void machine_kexec(struct kimage *kimage)
 	pr_debug("%s:%d: relocate_new_kernel_size: 0x%lx(%lu) bytes\n",
 		__func__, __LINE__, arm64_relocate_new_kernel_size,
 		arm64_relocate_new_kernel_size);
+
+	kexec_list_dump(kimage, DUMP_VERBOSITY);
+	dump_cpus();
 
 	/*
 	 * Copy arm64_relocate_new_kernel to the reboot_code_buffer for use
