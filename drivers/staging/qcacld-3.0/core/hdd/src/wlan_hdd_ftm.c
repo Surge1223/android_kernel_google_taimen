@@ -166,7 +166,6 @@ void hdd_ftm_mc_process_msg(void *message)
 	wlan_hdd_testmode_rx_event(data, (size_t) data_len);
 #endif
 #endif
-	return;
 }
 
 #if  defined(QCA_WIFI_FTM)
@@ -187,7 +186,8 @@ static int wlan_hdd_qcmbr_command(hdd_adapter_t *adapter,
 	switch (pqcmbr_data->cmd) {
 	case ATH_XIOCTL_UNIFIED_UTF_CMD: {
 		pqcmbr_data->copy_to_user = 0;
-		if (pqcmbr_data->length) {
+		if (pqcmbr_data->length &&
+			pqcmbr_data->length <= sizeof(pqcmbr_data->buf)) {
 			if (wlan_hdd_ftm_testmode_cmd(pqcmbr_data->buf,
 						      pqcmbr_data->
 						      length)
@@ -313,11 +313,10 @@ int wlan_hdd_qcmbr_unified_ioctl(hdd_adapter_t *adapter, struct ifreq *ifr)
 {
 	int ret = 0;
 
-	if (is_compat_task()) {
+	if (is_compat_task())
 		ret = wlan_hdd_qcmbr_compat_ioctl(adapter, ifr);
-	} else {
+	else
 		ret = wlan_hdd_qcmbr_ioctl(adapter, ifr);
-	}
 
 	return ret;
 }
@@ -334,6 +333,9 @@ static void wlanqcmbr_mc_process_msg(void *message)
 	uint32_t data_len;
 
 	data_len = *((uint32_t *) message) + sizeof(uint32_t);
+	if (data_len > MAX_UTF_LENGTH + 4)
+		return;
+
 	qcmbr_buf = qdf_mem_malloc(sizeof(qcmbr_queue_t));
 	if (qcmbr_buf != NULL) {
 		memcpy(qcmbr_buf->utf_buf, message, data_len);

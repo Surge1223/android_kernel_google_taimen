@@ -28,7 +28,6 @@
 #include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <linux/slab.h>
-#include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
@@ -77,9 +76,7 @@ struct easelcomm_user_state {
 };
 
 /* max delay in msec waiting for remote to wrap command channel */
-#define CMDCHAN_WRAP_DONE_TIMEOUT_MS 500  /* TODO: set to 2000 (b/65052892) */
-/* additional retry times for asking remote to wrap command channel */
-#define CMDCHAN_SEND_WRAP_RETRY_TIMES 3   /* TODO: remove (b/65052892) */
+#define CMDCHAN_WRAP_DONE_TIMEOUT_MS 1000
 /* max delay in msec waiting for remote to ack link shutdown */
 #define LINK_SHUTDOWN_ACK_TIMEOUT 500
 /* max delay in msec waiting for remote to return flush done */
@@ -158,9 +155,9 @@ static void easelcomm_grab_reference(
 {
 	if (!msg_metadata)
 		return;
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	msg_metadata->reference_count++;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 }
 
 /*
@@ -173,7 +170,7 @@ struct easelcomm_message_metadata *easelcomm_find_local_message(
 	struct easelcomm_message_metadata *msg_metadata = NULL;
 	struct easelcomm_message_metadata *msg_cursor;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	list_for_each_entry(msg_cursor, &service->local_list,
 			list) {
 		if (msg_cursor->msg->desc.message_id == message_id) {
@@ -182,7 +179,7 @@ struct easelcomm_message_metadata *easelcomm_find_local_message(
 			break;
 		}
 	}
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	return msg_metadata;
 }
 EXPORT_SYMBOL(easelcomm_find_local_message);
@@ -197,7 +194,7 @@ struct easelcomm_message_metadata *easelcomm_find_remote_message(
 	struct easelcomm_message_metadata *msg_metadata = NULL;
 	struct easelcomm_message_metadata *msg_cursor;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	list_for_each_entry(msg_cursor, &service->remote_list, list) {
 		if (msg_cursor->msg->desc.message_id == message_id) {
 			msg_metadata = msg_cursor;
@@ -205,7 +202,7 @@ struct easelcomm_message_metadata *easelcomm_find_remote_message(
 			break;
 		}
 	}
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	return msg_metadata;
 }
 EXPORT_SYMBOL(easelcomm_find_remote_message);
@@ -224,10 +221,10 @@ static struct easelcomm_message_metadata *easelcomm_grab_reply_message(
 
 	if (!orig_msg_metadata)
 		return NULL;
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	reply_msg_metadata = orig_msg_metadata->reply_metadata;
 	orig_msg_metadata->reply_metadata = NULL;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	return reply_msg_metadata;
 }
 
@@ -263,7 +260,7 @@ static struct easelcomm_message_metadata *easelcomm_add_metadata(
 	init_completion(&msg_metadata->reply_received);
 	msg_metadata->reply_metadata = NULL;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	switch (msg_metadata->msg_type) {
 	case TYPE_LOCAL:
 		/* add to the local list */
@@ -288,7 +285,7 @@ static struct easelcomm_message_metadata *easelcomm_add_metadata(
 	default:
 		WARN_ON(1);
 	}
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	return msg_metadata;
 }
 
@@ -343,7 +340,7 @@ void easelcomm_drop_reference(
 	if (!msg_metadata)
 		return;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	if (!WARN_ON(!msg_metadata->reference_count))
 		msg_metadata->reference_count--;
 
@@ -352,7 +349,7 @@ void easelcomm_drop_reference(
 
 	if (!msg_metadata->reference_count && msg_metadata->free_message)
 		easelcomm_free_message(service, msg_metadata);
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 }
 EXPORT_SYMBOL(easelcomm_drop_reference);
 
@@ -380,7 +377,7 @@ static bool easelcomm_flush_message(
 	/*
 	 * If we may be working on a DMA transfer then trigger an abort.  If
 	 * a local process is working on it then a refcount will be held, and
-	 * we'll need to retry after dropping the spinlock, letting the
+	 * we'll need to retry after dropping the mutex, letting the
 	 * process handle the DMA abort and then drop the refcount.
 	 */
 	if (msg_metadata->msg->desc.dma_buf_size &&
@@ -425,7 +422,7 @@ static void easelcomm_flush_local_service(struct easelcomm_service *service)
 #define MAX_FLUSH_TRIES 4
 
 	for (i = 0; need_retry && i < MAX_FLUSH_TRIES; i++) {
-		spin_lock(&service->lock);
+		mutex_lock(&service->lock);
 		need_retry = false;
 		list_for_each_entry_safe(
 			msg_cursor, msg_temp, &service->local_list, list) {
@@ -437,7 +434,7 @@ static void easelcomm_flush_local_service(struct easelcomm_service *service)
 			need_retry |= easelcomm_flush_message(
 				service, msg_cursor);
 		}
-		spin_unlock(&service->lock);
+		mutex_unlock(&service->lock);
 
 		if (!need_retry)
 			break;
@@ -459,12 +456,12 @@ static void __force_complete_reply_waiter(struct easelcomm_service *service)
 {
 	struct easelcomm_message_metadata *msg_cursor;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	list_for_each_entry(msg_cursor, &service->local_list, list) {
 		if (msg_cursor->msg->desc.need_reply)
 			complete(&msg_cursor->reply_received);
 	}
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 }
 
 /*
@@ -491,12 +488,12 @@ static void easelcomm_handle_service_shutdown(
 	if (shutdown_local)
 		easelcomm_flush_local_service(service);
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	if (shutdown_local)
 		service->shutdown_local = true;
 	else
 		service->shutdown_remote = true;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	/* Wakeup any receiveMessage() waiter so they can return to user */
 	complete(&service->receivemsg_queue_new);
 
@@ -584,7 +581,7 @@ static void easelcomm_handle_cmd_ack_shutdown(void)
  */
 static void easelcomm_handle_cmd_send_msg(
 	struct easelcomm_service *service, char *command_args,
-	int command_arg_len)
+	size_t command_arg_len)
 {
 	struct easelcomm_kmsg *cmd_msg;
 	struct easelcomm_kmsg *new_msg;
@@ -683,7 +680,7 @@ static void easelcomm_cmd_channel_remote_set_ready(void)
  * channel.
  */
 static void easelcomm_handle_cmd_link_init(
-	char *command_args, int command_arg_len)
+	char *command_args, size_t command_arg_len)
 {
 	dev_dbg(easelcomm_miscdev.this_device, "recv cmd LINK_INIT\n");
 	easelcomm_cmd_channel_remote_set_ready();
@@ -758,7 +755,7 @@ static void easelcomm_init_service(struct easelcomm_service *service, int id)
 	service->user = NULL;
 	service->shutdown_local = false;
 	service->shutdown_remote = false;
-	spin_lock_init(&service->lock);
+	mutex_init(&service->lock);
 	INIT_LIST_HEAD(&service->local_list);
 	INIT_LIST_HEAD(&service->receivemsg_queue);
 	init_completion(&service->receivemsg_queue_new);
@@ -1027,9 +1024,9 @@ static void easelcomm_initiate_service_shutdown(
 {
 	bool already_shutdown;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	already_shutdown = service->shutdown_local;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 
 	if (already_shutdown) {
 		dev_dbg(easelcomm_miscdev.this_device,
@@ -1060,9 +1057,9 @@ static int easelcomm_release(struct inode *inode, struct file *file)
 
 			if (easelcomm_up)
 				easelcomm_initiate_service_shutdown(service);
-			spin_lock(&service->lock);
+			mutex_lock(&service->lock);
 			service->user = NULL;
-			spin_unlock(&service->lock);
+			mutex_unlock(&service->lock);
 		}
 
 		kfree(file->private_data);
@@ -1119,8 +1116,7 @@ static int easelcomm_cmd_channel_send_wrap(
 	long remaining;
 	uint64_t wrap_marker = CMD_BUFFER_WRAP_MARKER;
 
-	/* TODO: remove retry code once b/65052892 is fixed */
-	do {
+	{
 		if (attempted > 0) {
 			dev_warn(easelcomm_miscdev.this_device,
 				 "%s: retrying after %d attempts",
@@ -1162,7 +1158,10 @@ static int easelcomm_cmd_channel_send_wrap(
 				msecs_to_jiffies(CMDCHAN_WRAP_DONE_TIMEOUT_MS));
 		if (remaining > 0) {
 			ret = 0;
-			break;  /* remote did catch up; no need to retry */
+			dev_dbg(easelcomm_miscdev.this_device,
+				"cmdchan wrap completed, new off=%llx\n",
+				channel->write_offset);
+			goto exit;
 		}
 		if (remaining < 0) {
 			/* waiting was interrupted */
@@ -1177,7 +1176,7 @@ static int easelcomm_cmd_channel_send_wrap(
 			"remote channel did not catch up: reason timeout off=%llx seq=%llu\n",
 			channel->write_offset, channel->write_seqnbr);
 		ret = -ETIMEDOUT;
-	} while (attempted <= CMDCHAN_SEND_WRAP_RETRY_TIMES);
+	}
 
 exit:
 	return ret;
@@ -1192,12 +1191,12 @@ exit:
  */
 int easelcomm_start_cmd(
 	struct easelcomm_service *service, int command_code,
-	int command_arg_len)
+	size_t command_arg_len)
 {
 	struct easelcomm_cmd_channel_remote *channel =
 		&cmd_channel_remote;
 	struct easelcomm_cmd_header cmdhdr;
-	unsigned int cmdbuf_size =
+	size_t cmdbuf_size =
 	    sizeof(struct easelcomm_cmd_header) + command_arg_len;
 	int ret;
 
@@ -1223,13 +1222,14 @@ int easelcomm_start_cmd(
 			goto error;
 	}
 
-	dev_dbg(easelcomm_miscdev.this_device, "cmdchan producer sending cmd seq#%llu svc=%u cmd=%u arglen=%u off=%llx\n",
+	dev_dbg(easelcomm_miscdev.this_device,
+		"cmdchan producer sending cmd seq#%llu svc=%u cmd=%u arglen=%zu off=%llx\n",
 		channel->write_seqnbr, service->service_id, command_code,
 		command_arg_len, channel->write_offset);
 	cmdhdr.service_id = service->service_id;
 	cmdhdr.sequence_nbr = channel->write_seqnbr;
 	cmdhdr.command_code = command_code;
-	cmdhdr.command_arg_len = command_arg_len;
+	cmdhdr.command_arg_len = (uint32_t)command_arg_len;
 
 	/*
 	 * Send the command header. Subsequent calls to
@@ -1324,11 +1324,11 @@ static easelcomm_msgid_t easelcomm_next_msgid(
 {
 	easelcomm_msgid_t next_id;
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	next_id = ++service->next_id;
 	if (!next_id)
 		next_id = ++service->next_id;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	return next_id;
 }
 
@@ -1449,7 +1449,7 @@ static int easelcomm_wait_message(
 	}
 
 	while (!msg_metadata) {
-		spin_lock(&service->lock);
+		mutex_lock(&service->lock);
 		if (service->shutdown_local ||
 		    (easelcomm_is_client() && service->shutdown_remote)) {
 			/* Service shutdown initiated locally or remotely. */
@@ -1458,7 +1458,7 @@ static int easelcomm_wait_message(
 				service->service_id, service->shutdown_local,
 				service->shutdown_remote);
 			service->shutdown_remote = false;
-			spin_unlock(&service->lock);
+			mutex_unlock(&service->lock);
 			return -ESHUTDOWN;
 		}
 		/* grab first entry off receiveMessage queue. */
@@ -1467,7 +1467,7 @@ static int easelcomm_wait_message(
 			struct easelcomm_message_metadata, rcvq_list);
 		if (msg_metadata)
 			break;
-		spin_unlock(&service->lock);
+		mutex_unlock(&service->lock);
 		if (has_timeout) {
 			remaining = wait_for_completion_interruptible_timeout(
 					&service->receivemsg_queue_new,
@@ -1492,7 +1492,7 @@ static int easelcomm_wait_message(
 	list_del(&msg_metadata->rcvq_list);
 	msg_metadata->queued = false;
 	msg_metadata->reference_count++;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	/* Copy the message desc to the caller */
 	if (copy_to_user(msgp, msg_metadata->msg,
 				sizeof(struct easelcomm_kmsg_desc)))
@@ -1652,16 +1652,16 @@ static int easelcomm_register(struct easelcomm_user_state *user_state,
 	}
 	mutex_unlock(&service_mutex);
 
-	spin_lock(&service->lock);
+	mutex_lock(&service->lock);
 	if (service->user) {
-		spin_unlock(&service->lock);
+		mutex_unlock(&service->lock);
 		return -EBUSY;
 	}
 	user_state->service = service;
 	service->user = user_state;
 	service->shutdown_local = false;
 	service->shutdown_remote = false;
-	spin_unlock(&service->lock);
+	mutex_unlock(&service->lock);
 	dev_dbg(easelcomm_miscdev.this_device, "REGISTER svc %u\n",
 		service_id);
 
