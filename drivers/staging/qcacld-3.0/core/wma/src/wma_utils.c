@@ -1538,12 +1538,9 @@ static int wma_unified_radio_tx_power_level_stats_event_handler(void *handle,
 			 fixed_param->radio_id);
 
 	if (fixed_param->num_tx_power_levels > ((WMI_SVC_MSG_MAX_SIZE -
-	    sizeof(*fixed_param)) / sizeof(uint32_t)) ||
-	    fixed_param->num_tx_power_levels >
-	    param_tlvs->num_tx_time_per_power_level) {
-		WMA_LOGE("%s: excess tx_power buffers:%d, num_tx_time_per_power_level:%d",
-			__func__, fixed_param->num_tx_power_levels,
-			param_tlvs->num_tx_time_per_power_level);
+	    sizeof(*fixed_param)) / sizeof(uint32_t))) {
+		WMA_LOGE("%s: excess tx_power buffers:%d", __func__,
+			fixed_param->num_tx_power_levels);
 		return -EINVAL;
 	}
 
@@ -2205,6 +2202,17 @@ int wma_unified_link_iface_stats_event_handler(void *handle,
 		WMA_LOGE("%s: Excess num offload stats recvd from fw: %d, um_iface_offload_stats: %d",
 			__func__, fixed_param->num_offload_stats,
 			param_tlvs->num_iface_offload_stats);
+		return -EINVAL;
+	}
+
+	if (link_stats->num_ac > WIFI_AC_MAX) {
+		WMA_LOGE("%s: Excess data received from firmware num_ac %d",
+			 __func__, link_stats->num_ac);
+		return -EINVAL;
+	}
+	if (fixed_param->num_offload_stats > WMI_OFFLOAD_STATS_TYPE_MAX) {
+		WMA_LOGE("%s: Excess num offload stats recvd from fw: %d",
+			__func__, fixed_param->num_offload_stats);
 		return -EINVAL;
 	}
 
