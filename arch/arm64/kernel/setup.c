@@ -224,7 +224,7 @@ static void __init request_standard_resources(void)
 			res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
 		} else {
 			res->name  = "System RAM";
-			res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
+			res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
 		}
 		res->start = __pfn_to_phys(memblock_region_memory_base_pfn(region));
 		res->end = __pfn_to_phys(memblock_region_memory_end_pfn(region)) - 1;
